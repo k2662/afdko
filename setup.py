@@ -4,7 +4,6 @@ from skbuild import setup
 # from skbuild.exceptions import SKBuildError
 # from skbuild.cmaker import get_cmake_version
 
-
 def main():
     classifiers = [
         'Development Status :: 5 - Production/Stable',
