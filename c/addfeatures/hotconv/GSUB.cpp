@@ -41,7 +41,7 @@ typedef struct { /* Subtable record */
     LOffset offset;     /* From beginning of first subtable */
     struct {            /* Extension-related data */
         short use;      /* Use extension lookupType? If set, then following used: */
-        otlTbl otl;     /* For coverages and classes of this extension subtable */
+        otlTbl *otl;     /* For coverages and classes of this extension subtable */
         LOffset offset; /* Offset to this extension subtable, from beginning of extension section. Debug only. */
         ExtensionSubstFormat1 *tbl;
         /* Subtable data */
@@ -114,7 +114,7 @@ struct GSUBCtx_ {
 
     unsigned short maxContext;
 
-    otlTbl otl; /* OTL table */
+    otlTbl *otl; /* OTL table */
     hotCtx g;   /* Package context */
 };
 
@@ -198,7 +198,7 @@ void GSUBNew(hotCtx g) {
     dnaINIT(g->DnaCTX, h->featNameID, 8, 8);
 
     h->maxContext = 0;
-    h->otl = NULL;
+    h->otl = nullptr;
 
     /* Link contexts */
     h->g = g;
@@ -262,7 +262,7 @@ int GSUBFill(hotCtx g) {
         hasFeatureParam = ((sub->lkpType == GSUBFeatureNameParam) ||
                            (sub->lkpType == GSUBCVParam));
 
-        otlSubtableAdd(g, h->otl, sub->script, sub->language, sub->feature,
+        h->otl->subtableAdd(sub->script, sub->language, sub->feature,
                        isExt ? GSUBExtension : sub->lkpType,
                        sub->lkpFlag, sub->markSetIndex,
                        isExt ? sub->lkpType : 0,
@@ -273,11 +273,11 @@ int GSUBFill(hotCtx g) {
     }
     DF(1, (stderr, "### GSUB:\n"));
 
-    otlTableFill(g, h->otl, h->offset.featParam);
+    h->otl->fill(h->offset.featParam);
 
-    h->offset.extensionSection = h->offset.subtable + otlGetCoverageSize(h->otl) + otlGetClassSize(h->otl);
+    h->offset.extensionSection = h->offset.subtable + h->otl->getCoverageSize() + h->otl->getClassSize();
 #if HOT_DEBUG
-    otlDumpSizes(g, h->otl, h->offset.subtable, h->offset.extension);
+    h->otl->dumpSizes(h->offset.subtable, h->offset.extension);
 #endif /* HOT_DEBUG */
 
     /* setAnonLookupIndices marks as used not only the anonymous lookups, */
@@ -286,7 +286,7 @@ int GSUBFill(hotCtx g) {
     /* checkStandAloneTablRefs has to follow setAnonLookupIndices.        */
     setAnonLookupIndices(g, h);
 
-    checkStandAloneTablRefs(g, h->otl);
+    h->otl->checkStandAloneRefs();
 
     OS_2SetMaxContext(g, h->maxContext);
 
@@ -319,19 +319,12 @@ void GSUBWrite(hotCtx g) {
     GSUBCtx h = g->ctx.GSUB;
 
     /* Write OTL features */
-    if (h->subtables.cnt == 0) {
-        /* When (h->subtables.cnt ==0), we get here only if the -fs option has been specified. */
-        h->otl = otlTableNew(g);
-        otlTableFillStub(g, h->otl);
-        otlTableWrite(g, h->otl);
-        /* don't need to call featParamsWrite(): no features without lookup subtables. */
-        otlLookupListWrite(g, h->otl);
-        return;
-    }
+    if (h->subtables.cnt == 0)
+        h->otl = new otlTbl(g);
 
-    otlTableWrite(g, h->otl); /* write header, ScriptList and FeatureList.*/
+    h->otl->write(); /* write header, ScriptList and FeatureList.*/
     featParamsWrite(g, h); /* write the feature param subtables after the FeatureList */
-    otlLookupListWrite(g, h->otl);
+    h->otl->lookupListWrite();
 
     /* Write main subtable section */
     for (i = 0; i < h->subtables.cnt; i++) {
@@ -383,8 +376,8 @@ void GSUBWrite(hotCtx g) {
     }
 
     /* Write main coverage and class tables */
-    otlCoverageWrite(g, h->otl);
-    otlClassWrite(g, h->otl);
+    h->otl->coverageWrite();
+    h->otl->classWrite();
 
     /* Write extension subtables section. Each subtable is immediately  */
     /* followed by its coverages and classes                            */
@@ -495,7 +488,8 @@ void GSUBReuse(hotCtx g) {
     h->featNameID.cnt = 0;
 
     h->maxContext = 0;
-    otlTableReuse(g, h->otl);
+    delete h->otl;
+    h->otl = nullptr;
 }
 
 void GSUBFree(hotCtx g) {
@@ -513,7 +507,8 @@ void GSUBFree(hotCtx g) {
     dnaFREE(h->prod);
     dnaFREE(h->featNameID);
 
-    otlTableFree(g, h->otl);
+    delete h->otl;
+    h->otl = nullptr;
     MEM_FREE(g, g->ctx.GSUB);
 }
 
@@ -563,7 +558,7 @@ static void startNewSubtable(hotCtx g) {
 
     sub->extension.use = h->nw.useExtension;
     if (h->nw.useExtension && (!IS_REF_LAB(h->nw.label)) && (!hasFeatureParam)) {
-        sub->extension.otl = otlTableNew(g);
+        sub->extension.otl = new otlTbl(g);
         sub->extension.offset = h->offset.extension; /* Not needed */
         sub->extension.tbl = fillExtension(g, h, h->nw.lkpType);
     } else {
@@ -728,7 +723,7 @@ void GSUBLookupEnd(hotCtx g, Tag feature) {
 
     if (h->otl == NULL) {
         /* Allocate table if not done so already */
-        h->otl = otlTableNew(g);
+        h->otl = new otlTbl(g);
     }
 
     switch (h->nw.lkpType) {
@@ -1028,13 +1023,13 @@ static void checkAndSortSingle(hotCtx g, GSUBCtx h) {
 
 /* Fill single substitution format coverage table */
 
-static Offset fillSingleCoverage(hotCtx g, GSUBCtx h, otlTbl otl) {
+static Offset fillSingleCoverage(hotCtx g, GSUBCtx h, otlTbl *otl) {
     int i;
-    otlCoverageBegin(g, otl);
+    otl->coverageBegin();
     for (i = 0; i < h->nw.rules.cnt; i++) {
-        otlCoverageAddGlyph(g, otl, h->nw.rules.array[i].targ->gid);
+        otl->coverageAddGlyph(h->nw.rules.array[i].targ->gid);
     }
-    return otlCoverageEnd(g, otl);
+    return otl->coverageEnd();
 }
 
 /* Fill format 1 single substitution subtable */
@@ -1042,7 +1037,7 @@ static Offset fillSingleCoverage(hotCtx g, GSUBCtx h, otlTbl otl) {
 static void fillSingle1(hotCtx g, GSUBCtx h, int delta) {
     LOffset size = SINGLE1_SIZE;
     Subtable *sub = h->nw.sub; /* startNewSubtable() called already. */
-    otlTbl otl = sub->extension.use ? sub->extension.otl : h->otl;
+    otlTbl *otl = sub->extension.use ? sub->extension.otl : h->otl;
     SingleSubstFormat1 *fmt =
         (SingleSubstFormat1 *)MEM_NEW(g, sizeof(SingleSubstFormat1));
 
@@ -1052,7 +1047,7 @@ static void fillSingle1(hotCtx g, GSUBCtx h, int delta) {
 
     if (sub->extension.use) {
         fmt->Coverage += size; /* Final value */
-        h->offset.extension += size + otlGetCoverageSize(otl);
+        h->offset.extension += size + otl->getCoverageSize();
         /* h->offset.subtable already incr in fillExtension() */
     } else {
         h->offset.subtable += size;
@@ -1067,7 +1062,7 @@ static void fillSingle2(hotCtx g, GSUBCtx h) {
     int i;
     LOffset size;
     Subtable *sub = h->nw.sub; /* startNewSubtable() called already. */
-    otlTbl otl = sub->extension.use ? sub->extension.otl : h->otl;
+    otlTbl *otl = sub->extension.use ? sub->extension.otl : h->otl;
     SingleSubstFormat2 *fmt =
         (SingleSubstFormat2 *)MEM_NEW(g, sizeof(SingleSubstFormat2));
 
@@ -1082,7 +1077,7 @@ static void fillSingle2(hotCtx g, GSUBCtx h) {
     size = SINGLE2_SIZE(fmt->GlyphCount);
     if (sub->extension.use) {
         fmt->Coverage += size; /* Final value */
-        h->offset.extension += size + otlGetCoverageSize(otl);
+        h->offset.extension += size + otl->getCoverageSize();
         /* h->offset.subtable already incr in fillExtension() */
     } else {
         h->offset.subtable += size;
@@ -1150,7 +1145,7 @@ static void writeSingle1(hotCtx g, GSUBCtx h, Subtable *sub) {
     OUT2(fmt->DeltaGlyphID);
 
     if (sub->extension.use) {
-        otlCoverageWrite(g, sub->extension.otl);
+        sub->extension.otl->coverageWrite();
     }
 }
 
@@ -1173,7 +1168,7 @@ static void writeSingle2(hotCtx g, GSUBCtx h, Subtable *sub) {
     }
 
     if (sub->extension.use) {
-        otlCoverageWrite(g, sub->extension.otl);
+        sub->extension.otl->coverageWrite();
     }
 }
 
@@ -1261,7 +1256,6 @@ static int CTL_CDECL cmpMultiple(const void *first, const void *second) {
 
 static void fillMultiple1(hotCtx g, GSUBCtx h, long beg, long end, long size,
                           unsigned int nSubs) {
-    otlTbl otl;
     Subtable *sub;
     // int isRTL;
     unsigned nSequences;
@@ -1281,7 +1275,7 @@ static void fillMultiple1(hotCtx g, GSUBCtx h, long beg, long end, long size,
 
     startNewSubtable(g);
     sub = h->nw.sub;
-    otl = sub->extension.use ? sub->extension.otl : h->otl;
+    otlTbl *otl = sub->extension.use ? sub->extension.otl : h->otl;
     // isRTL = sub->lkpFlag & otlRightToLeft;
 
     fmt->SubstFormat = 1;
@@ -1292,13 +1286,13 @@ static void fillMultiple1(hotCtx g, GSUBCtx h, long beg, long end, long size,
     pSubs = (GID *)MEM_NEW(g, sizeof(GID) * nSubs);
 
     offset = MULTIPLE1_HDR_SIZE(nSequences);
-    otlCoverageBegin(g, otl);
+    otl->coverageBegin();
     for (i = 0; i < (long)nSequences; i++) {
         GNode *node;
         SubstRule *rule = &h->nw.rules.array[i + beg];
         Sequence *seqSet = &fmt->sequence_[i];
 
-        otlCoverageAddGlyph(g, otl, rule->targ->gid);
+        otl->coverageAddGlyph(rule->targ->gid);
 
         /* --- Fill an Sequence --- */
         seqSet->Substitute = pSubs;
@@ -1325,10 +1319,10 @@ static void fillMultiple1(hotCtx g, GSUBCtx h, long beg, long end, long size,
 #endif
 #endif /* HOT_DEBUG */
 
-    fmt->Coverage = otlCoverageEnd(g, otl); /* Adjusted later */
+    fmt->Coverage = otl->coverageEnd(); /* Adjusted later */
     if (sub->extension.use) {
         fmt->Coverage += offset; /* Final value */
-        h->offset.extension += offset + otlGetCoverageSize(otl);
+        h->offset.extension += offset + otl->getCoverageSize();
         /* h->offset.subtable already incr in fillExtension() */
     } else {
         h->offset.subtable += offset;
@@ -1442,7 +1436,7 @@ static void writeMultiple(hotCtx g, GSUBCtx h, Subtable *sub) {
     }
 
     if (sub->extension.use) {
-        otlCoverageWrite(g, sub->extension.otl);
+        sub->extension.otl->coverageWrite();
     }
 }
 
@@ -1492,7 +1486,6 @@ static int CTL_CDECL cmpAlternate(const void *first, const void *second) {
 
 static void fillAlternate1(hotCtx g, GSUBCtx h, long beg, long end, long size,
                            unsigned numAlts) {
-    otlTbl otl;
     Subtable *sub;
     unsigned nAltSets;
     GID *pAlts;
@@ -1511,7 +1504,7 @@ static void fillAlternate1(hotCtx g, GSUBCtx h, long beg, long end, long size,
 
     startNewSubtable(g);
     sub = h->nw.sub;
-    otl = sub->extension.use ? sub->extension.otl : h->otl;
+    otlTbl *otl = sub->extension.use ? sub->extension.otl : h->otl;
 
     fmt->SubstFormat = 1;
     fmt->AlternateSetCount = nAltSets = end - beg + 1;
@@ -1521,13 +1514,13 @@ static void fillAlternate1(hotCtx g, GSUBCtx h, long beg, long end, long size,
     pAlts = (GID *)MEM_NEW(g, sizeof(GID) * numAlts);
 
     offset = ALTERNATE1_HDR_SIZE(nAltSets);
-    otlCoverageBegin(g, otl);
+    otl->coverageBegin();
     for (i = 0; i < (long)nAltSets; i++) {
         GNode *node;
         SubstRule *rule = &h->nw.rules.array[i + beg];
         AlternateSet *altSet = &fmt->alternateSet_[i];
 
-        otlCoverageAddGlyph(g, otl, rule->targ->gid);
+        otl->coverageAddGlyph(rule->targ->gid);
 
         /* --- Fill an AlternateSet --- */
         altSet->Alternate = pAlts;
@@ -1554,10 +1547,10 @@ static void fillAlternate1(hotCtx g, GSUBCtx h, long beg, long end, long size,
 #endif
 #endif /* HOT_DEBUG */
 
-    fmt->Coverage = otlCoverageEnd(g, otl); /* Adjusted later */
+    fmt->Coverage = otl->coverageEnd(); /* Adjusted later */
     if (sub->extension.use) {
         fmt->Coverage += offset; /* Final value */
-        h->offset.extension += offset + otlGetCoverageSize(otl);
+        h->offset.extension += offset + otl->getCoverageSize();
         /* h->offset.subtable already incr in fillExtension() */
     } else {
         h->offset.subtable += offset;
@@ -1650,7 +1643,7 @@ static void writeAlternate(hotCtx g, GSUBCtx h, Subtable *sub) {
     }
 
     if (sub->extension.use) {
-        otlCoverageWrite(g, sub->extension.otl);
+        sub->extension.otl->coverageWrite();
     }
 }
 
@@ -1792,7 +1785,6 @@ static unsigned totNumComp(GSUBCtx h) {
 /* Fill ligature substitution subtable */
 
 static void fillLigature(hotCtx g, GSUBCtx h) {
-    otlTbl otl;
     Subtable *sub;
     long i;
     int j;
@@ -1805,7 +1797,7 @@ static void fillLigature(hotCtx g, GSUBCtx h) {
 
     startNewSubtable(g);
     sub = h->nw.sub;
-    otl = sub->extension.use ? sub->extension.otl : h->otl;
+    otlTbl *otl = sub->extension.use ? sub->extension.otl : h->otl;
 
     checkAndSortLigature(g, h);
 
@@ -1815,13 +1807,13 @@ static void fillLigature(hotCtx g, GSUBCtx h) {
     rulesDump(h);
 #endif
 
-    otlCoverageBegin(g, otl);
+    otl->coverageBegin();
     for (i = 0; i < h->nw.rules.cnt; i++) {
         SubstRule *rule = &h->nw.rules.array[i];
 
         if (i == 0 || rule->targ->gid != (rule - 1)->targ->gid) {
             nLigSets++;
-            otlCoverageAddGlyph(g, otl, rule->targ->gid);
+            otl->coverageAddGlyph(rule->targ->gid);
         }
     }
     fmt->SubstFormat = 1;
@@ -1898,10 +1890,10 @@ static void fillLigature(hotCtx g, GSUBCtx h) {
     }
 
     check_overflow(g, "lookup subtable", offset, "ligature substitution");
-    fmt->Coverage = otlCoverageEnd(g, otl); /* Adjusted later */
+    fmt->Coverage = otl->coverageEnd(); /* Adjusted later */
     if (sub->extension.use) {
         fmt->Coverage += offset; /* Final value */
-        h->offset.extension += offset + otlGetCoverageSize(otl);
+        h->offset.extension += offset + otl->getCoverageSize();
         /* h->offset.subtable already incr in fillExtension() */
     } else {
         h->offset.subtable += offset;
@@ -1947,7 +1939,7 @@ static void writeLigature(hotCtx g, GSUBCtx h, Subtable *sub) {
     }
 
     if (sub->extension.use) {
-        otlCoverageWrite(g, sub->extension.otl);
+        sub->extension.otl->coverageWrite();
     }
 }
 
@@ -2329,7 +2321,7 @@ static void setAnonLookupIndices(hotCtx g, GSUBCtx h) {
         SubstLookupRecord *slr = h->subLookup.array[i];
         DF(2, (stderr, "slr: Label 0x%x", slr->LookupListIndex));
         slr->LookupListIndex =
-            otlLabel2LookupIndex(g, h->otl, slr->LookupListIndex);
+            h->otl->label2LookupIndex(slr->LookupListIndex);
         DF(2, (stderr, " -> LookupListIndex %u\n", slr->LookupListIndex));
     }
 }
@@ -2364,7 +2356,7 @@ static LOffset fillChain2(hotCtx g, GSUBCtx h, long inx) {
 
 /* p points to an input sequence; return new array of num coverages */
 
-static LOffset *setCoverages(hotCtx g, otlTbl otl, GNode *p, unsigned num) {
+static LOffset *setCoverages(hotCtx g, otlTbl *otl, GNode *p, unsigned num) {
     unsigned i;
     LOffset *cov;
 
@@ -2375,18 +2367,18 @@ static LOffset *setCoverages(hotCtx g, otlTbl otl, GNode *p, unsigned num) {
     cov = (LOffset *)MEM_NEW(g, sizeof(LOffset) * num);
     for (i = 0; i != num; i++, p = p->nextSeq) {
         GNode *q;
-        otlCoverageBegin(g, otl);
+        otl->coverageBegin();
         for (q = p; q != NULL; q = q->nextCl) {
-            otlCoverageAddGlyph(g, otl, q->gid);
+            otl->coverageAddGlyph(q->gid);
         }
-        cov[i] = otlCoverageEnd(g, otl); /* Adjusted later */
+        cov[i] = otl->coverageEnd(); /* Adjusted later */
     }
     return cov;
 }
 
 /* Fill chaining contextual subtable format 3 */
 
-static void fillChain3(hotCtx g, GSUBCtx h, otlTbl otl, Subtable *sub,
+static void fillChain3(hotCtx g, GSUBCtx h, otlTbl *otl, Subtable *sub,
                        long inx) {
     LOffset size;
     unsigned nBack = 0;
@@ -2510,7 +2502,7 @@ static void fillChain3(hotCtx g, GSUBCtx h, otlTbl otl, Subtable *sub,
             fmt->Lookahead[i] += size;
         }
 
-        h->offset.extension += size + otlGetCoverageSize(otl);
+        h->offset.extension += size + otl->getCoverageSize();
         /* h->offset.subtable already incr in fillExtension() */
     } else {
         h->offset.subtable += size;
@@ -2525,11 +2517,10 @@ static void fillChain(hotCtx g, GSUBCtx h) {
     /* xxx Each rule in a fmt3 for now */
     for (i = 0; i < h->nw.rules.cnt; i++) {
         Subtable *sub;
-        otlTbl otl;
 
         startNewSubtable(g);
         sub = h->nw.sub;
-        otl = sub->extension.use ? sub->extension.otl : h->otl;
+        otlTbl *otl = sub->extension.use ? sub->extension.otl : h->otl;
 
         fillChain3(g, h, otl, sub, i);
 
@@ -2619,7 +2610,7 @@ static void writeChain3(hotCtx g, GSUBCtx h, Subtable *sub) {
     writeSubstLookupRecords(h, fmt->substLookupRecord, fmt->SubstCount);
 
     if (sub->extension.use) {
-        otlCoverageWrite(g, sub->extension.otl);
+        sub->extension.otl->coverageWrite();
     }
 }
 
@@ -2747,7 +2738,7 @@ static int CTL_CDECL cmpGlyphIds(const void *first, const void *second) {
 }
 #endif
 
-static void fillReverseChain1(hotCtx g, GSUBCtx h, otlTbl otl, Subtable *sub,
+static void fillReverseChain1(hotCtx g, GSUBCtx h, otlTbl *otl, Subtable *sub,
                               long inx) {
     LOffset size;
     unsigned int i;
@@ -2804,11 +2795,11 @@ static void fillReverseChain1(hotCtx g, GSUBCtx h, otlTbl otl, Subtable *sub,
         sortInputList(h, &pInput);
     }
 
-    otlCoverageBegin(g, otl);
+    otl->coverageBegin();
     for (p = pInput; p != NULL; p = p->nextCl) {
-        otlCoverageAddGlyph(g, otl, p->gid);
+        otl->coverageAddGlyph(p->gid);
     }
-    fmt->InputCoverage = otlCoverageEnd(g, otl); /* Adjusted later */
+    fmt->InputCoverage = otl->coverageEnd(); /* Adjusted later */
 
     fmt->BacktrackGlyphCount = nBack;
     fmt->Backtrack = setCoverages(g, otl, pBack, nBack);
@@ -2848,7 +2839,7 @@ static void fillReverseChain1(hotCtx g, GSUBCtx h, otlTbl otl, Subtable *sub,
             fmt->Lookahead[i] += size;
         }
 
-        h->offset.extension += size + otlGetCoverageSize(otl);
+        h->offset.extension += size + otl->getCoverageSize();
         /* h->offset.subtable already incr in fillExtension() */
     } else {
         h->offset.subtable += size;
@@ -2862,11 +2853,10 @@ static void fillReverseChain(hotCtx g, GSUBCtx h) {
 
     for (i = 0; i < h->nw.rules.cnt; i++) {
         Subtable *sub;
-        otlTbl otl;
 
         startNewSubtable(g);
         sub = h->nw.sub;
-        otl = sub->extension.use ? sub->extension.otl : h->otl;
+        otlTbl *otl = sub->extension.use ? sub->extension.otl : h->otl;
 
         fillReverseChain1(g, h, otl, sub, i);
 
@@ -2929,7 +2919,7 @@ static void writeReverseChain(hotCtx g, GSUBCtx h, Subtable *sub) {
     }
 
     if (sub->extension.use) {
-        otlCoverageWrite(g, sub->extension.otl);
+        sub->extension.otl->coverageWrite();
     }
 }
 
@@ -2985,8 +2975,7 @@ static void writeExtension(hotCtx g, GSUBCtx h, Subtable *sub) {
 static void freeExtension(hotCtx g, GSUBCtx h, Subtable *sub) {
     ExtensionSubstFormat1 *fmt = sub->extension.tbl;
 
-    otlTableReuse(g, sub->extension.otl);
-    otlTableFree(g, sub->extension.otl);
+    delete sub->extension.otl;
     MEM_FREE(g, fmt);
 }
 
