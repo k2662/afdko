@@ -14,6 +14,7 @@ on:
 jobs:
   build_wheels:
     name: Build Py3 Wheel on ${{ matrix.os }}
+    permissions: write
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
